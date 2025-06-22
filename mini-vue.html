@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Mini Vue</title>
+</head>
+
+<body>
+    <div id="app">
+        <h1>{{ pageTitle }}</h1>
+        <h2>作者: {{ person.name }}</h2>
+        <h3>你好，{{ person.name }}！欢迎来到 {{ pageTitle }} 的世界。</h3>
+        <p>Message: {{ message }}</p>
+        <input type="text" v-model="message">
+        <br>
+        <input type="text" v-model="person.name">
+    </div>
+
+    <script>
+        class Dep {
+            constructor() {
+                this.subs = [];
+            }
+
+            addSub(watcher) {
+                if (watcher && watcher.update) {
+                    this.subs.push(watcher);
+                }
+            }
+
+            notify() {
+                this.subs.forEach(watcher => watcher.update());
+            }
+        }
+
+        class Watcher {
+            constructor(vm, key, cb) {
+                this.vm = vm;
+                this.key = key;
+                this.cb = cb;
+
+                Dep.target = this;
+                this.oldValue = this.getValue(vm, key);
+                Dep.target = null;
+            }
+
+            update() {
+                const newValue = this.getValue(this.vm, this.key);
+                if (newValue !== this.oldValue) {
+                    this.cb(newValue);
+                    this.oldValue = newValue;
+                }
+            }
+
+            getValue(vm, key) {
+                return key.split('.').reduce((data, currentKey) => {
+                    return data[currentKey.trim()];
+                }, vm.$data);
+            }
+        }
+
+        class Observer {
+            constructor(data) {
+                this.walk(data);
+            }
+
+            walk(data) {
+                if (!data || typeof data !== 'object') {
+                    return;
+                }
+                Object.keys(data).forEach(key => {
+                    this.defineReactive(data, key, data[key]);
+                });
+            }
+
+            defineReactive(obj, key, val) {
+                const dep = new Dep();
+                this.walk(val);
+
+                Object.defineProperty(obj, key, {
+                    enumerable: true,
+                    configurable: true,
+                    get() {
+                        if (Dep.target) {
+                            dep.addSub(Dep.target);
+                        }
+                        return val;
+                    },
+                    set: (newValue) => {
+                        if (newValue === val) return;
+                        val = newValue;
+                        this.walk(newValue);
+                        dep.notify();
+                    }
+                });
+            }
+        }
+
+        class Compiler {
+            constructor(vm) {
+                this.vm = vm;
+                this.el = vm.$el;
+                this.compile(this.el);
+            }
+
+            compile(el) {
+                const childNodes = Array.from(el.childNodes);
+                childNodes.forEach(node => {
+                    if (this.isTextNode(node)) {
+                        this.compileText(node);
+                    } else if (this.isElementNode(node)) {
+                        this.compileElement(node);
+                    }
+
+                    if (node.childNodes && node.childNodes.length) {
+                        this.compile(node);
+                    }
+                });
+            }
+
+            compileElement(node) {
+                Array.from(node.attributes).forEach(attr => {
+                    let attrName = attr.name;
+                    if (this.isDirective(attrName)) {
+                        attrName = attrName.substr(2);
+                        const key = attr.value;
+                        this.update(node, key, attrName);
+                    }
+                });
+            }
+
+            update(node, key, attrName) {
+                const updaterFn = this[attrName + 'Updater'];
+                updaterFn && updaterFn.call(this, node, this.vm, key);
+            }
+
+            textUpdater(node, vm, key) {
+                const updateFn = (value) => node.textContent = value;
+                new Watcher(vm, key, updateFn);
+                updateFn(this.getValue(vm, key));
+            }
+
+            modelUpdater(node, vm, key) {
+                const updateFn = (value) => node.value = value;
+                new Watcher(vm, key, updateFn);
+                updateFn(this.getValue(vm, key));
+
+                node.addEventListener('input', () => {
+                    this.setValue(vm, key, node.value);
+                });
+            }
+
+            compileText(node) {
+                const text = node.textContent;
+                const reg = /\{\{(.+?)\}\}/g;
+
+                if (!reg.test(text)) {
+                    return;
+                }
+
+                node.originalTextContent = text;
+
+                const keys = [];
+                text.replace(reg, (match, key) => {
+                    keys.push(key.trim());
+                });
+
+                keys.forEach(key => {
+                    new Watcher(this.vm, key, () => {
+                        this.updateTextNode(node);
+                    });
+                });
+
+                this.updateTextNode(node);
+            }
+
+            updateTextNode(node) {
+                let newText = node.originalTextContent;
+                const reg = /\{\{(.+?)\}\}/g;
+
+                // 用当前最新的值替换模板中的所有插值表达式
+                newText = newText.replace(reg, (match, key) => {
+                    return this.getValue(this.vm, key.trim());
+                });
+
+                node.textContent = newText;
+            }
+
+            isDirective(attrName) {
+                return attrName.startsWith('v-');
+            }
+
+            isTextNode(node) {
+                return node.nodeType === 3;
+            }
+
+            isElementNode(node) {
+                return node.nodeType === 1;
+            }
+
+            getValue(vm, key) {
+                return key.split('.').reduce((data, currentKey) => data[currentKey.trim()], vm.$data);
+            }
+
+            setValue(vm, key, value) {
+                const keys = key.split('.');
+                let data = vm.$data;
+                keys.forEach((k, index) => {
+                    if (index < keys.length - 1) {
+                        data = data[k.trim()];
+                    } else {
+                        data[k.trim()] = value;
+                    }
+                });
+            }
+        }
+
+        class Vue {
+            constructor(options) {
+                this.$options = options || {};
+                this.$el = typeof options.el === 'string' ? document.querySelector(options.el) : options.el;
+                this.$data = options.data || {};
+                this.proxyData(this.$data);
+                new Observer(this.$data);
+                new Compiler(this);
+            }
+
+            proxyData(data) {
+                Object.keys(data).forEach(key => {
+                    Object.defineProperty(this, key, {
+                        enumerable: true,
+                        configurable: true,
+                        get: () => {
+                            return data[key];
+                        },
+                        set: (newValue) => {
+                            if (newValue !== data[key]) {
+                                data[key] = newValue;
+                            }
+                        }
+                    });
+                });
+            }
+        }
+
+        const vm = new Vue({
+            el: '#app',
+            data: {
+                pageTitle: 'Mini Vue',
+                message: 'Hello, World!',
+                person: {
+                    name: '张三',
+                    age: 25
+                }
+            }
+        });
+
+    </script>
+</body>
+
+</html>
